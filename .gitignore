@@ -1,0 +1,20 @@
+# Secrets and credentials
+.env
+.env.*
+!.env.example
+token.json
+credentials.json
+client_secret_*.json
+
+# Storage and logs
+aria_audit.jsonl
+profiles/
+chroma_store/
+
+# IDE and environment
+.claude/
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
