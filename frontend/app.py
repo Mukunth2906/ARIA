@@ -6,6 +6,7 @@ Requires the FastAPI backend to be running:
   uvicorn backend.main:app --reload --port 8001
 """
 import os
+import time
 import requests
 import streamlit as st
 
@@ -76,7 +77,7 @@ st.markdown("""
 <div class="aria-banner">
   <h1>🔐 ARIA</h1>
   <p>Autonomous Response &amp; Inbox Assistant &nbsp;·&nbsp;
-  Gemini + LangGraph &nbsp;·&nbsp; 6-Gate Verification Chain &nbsp;·&nbsp;
+  Gemini + LangGraph &nbsp;·&nbsp; Whisper STT &nbsp;·&nbsp; 6-Gate Verification Chain &nbsp;·&nbsp;
   Dynamic User Profile</p>
 </div>
 """, unsafe_allow_html=True)
@@ -88,10 +89,32 @@ def api_chat(user_id: str, message: str) -> dict:
                       json={"user_id": user_id, "message": message}, timeout=90)
     r.raise_for_status(); return r.json()
 
+def api_voice(user_id: str, audio_file) -> dict:
+    files = {"file": (audio_file.name or "audio.wav", audio_file.getvalue(), audio_file.type or "audio/wav")}
+    data = {"user_id": user_id}
+    r = requests.post(f"{API}/api/voice", files=files, data=data, timeout=120)
+    r.raise_for_status(); return r.json()
+
 def api_confirm(thread_id: str, action: str) -> dict:
     r = requests.post(f"{API}/api/confirm",
                       json={"thread_id": thread_id, "action": action}, timeout=90)
     r.raise_for_status(); return r.json()
+
+def api_schedule_send(thread_id: str, delay_seconds: int = 10) -> dict:
+    r = requests.post(f"{API}/api/schedule_send",
+                      json={"thread_id": thread_id, "delay_seconds": delay_seconds}, timeout=30)
+    r.raise_for_status(); return r.json()
+
+def api_undo(thread_id: str) -> dict:
+    r = requests.post(f"{API}/api/undo",
+                      json={"thread_id": thread_id}, timeout=30)
+    r.raise_for_status(); return r.json()
+
+def api_status(thread_id: str) -> dict:
+    try:
+        r = requests.get(f"{API}/api/status/{thread_id}", timeout=10)
+        r.raise_for_status(); return r.json()
+    except Exception: return {}
 
 def api_edit(thread_id: str, user_id: str, original: str, new_body: str) -> dict:
     r = requests.post(f"{API}/api/edit",
@@ -213,35 +236,66 @@ with left:
             st.markdown(f"**{role_icon} {msg['role'].title()}:** {msg['content']}")
 
     if st.session_state.phase == "input":
-        user_input = st.text_area("Your request", height=120, label_visibility="collapsed",
-                                  placeholder="e.g. Mail ravi@acme.com about the Q2 report…")
-        if st.button("🚀 Send to ARIA", type="primary", use_container_width=True):
-            if not user_input.strip():
-                st.warning("Type a request first.")
-            else:
-                st.session_state.chat_history.append({"role": "user", "content": user_input.strip()})
-                with st.spinner("⚙️ Running 6-gate verification chain…"):
-                    try:
-                        res = api_chat(st.session_state.user_id, user_input.strip())
-                        st.session_state.thread_id   = res["thread_id"]
-                        st.session_state.agent_state = res["state"]
-                        st.session_state.user_input  = user_input.strip()
+        tab_text, tab_voice = st.tabs(["✍️ Type Request", "🎙️ Whisper Voice STT"])
 
-                        if res.get("needs_clarify"):
-                            st.session_state.chat_history.append(
-                                {"role": "assistant", "content": res["reply"]})
-                            st.session_state.phase = "input"   # let user respond
-                        elif res["state"].get("blocked"):
-                            st.session_state.phase = "result"
-                        else:
-                            st.session_state.phase = "review"
-                        st.rerun()
-                    except requests.exceptions.ConnectionError:
-                        st.error(f"Cannot reach API at {API}. Start the backend with: `uvicorn backend.main:app --reload --port 8001`")
-                    except Exception as e:
-                        st.error(f"Error: {e}")
+        with tab_text:
+            user_input = st.text_area("Your request", height=120, label_visibility="collapsed",
+                                      placeholder="e.g. Mail ravi@acme.com about the Q2 report…")
+            if st.button("🚀 Send to ARIA", type="primary", use_container_width=True, key="send_text"):
+                if not user_input.strip():
+                    st.warning("Type a request first.")
+                else:
+                    st.session_state.chat_history.append({"role": "user", "content": user_input.strip()})
+                    with st.spinner("⚙️ Running 6-gate verification chain…"):
+                        try:
+                            res = api_chat(st.session_state.user_id, user_input.strip())
+                            st.session_state.thread_id   = res["thread_id"]
+                            st.session_state.agent_state = res["state"]
+                            st.session_state.user_input  = user_input.strip()
 
-    elif st.session_state.phase in ("review", "result"):
+                            if res.get("needs_clarify"):
+                                st.session_state.chat_history.append(
+                                    {"role": "assistant", "content": res["reply"]})
+                                st.session_state.phase = "input"   # let user respond
+                            elif res["state"].get("blocked"):
+                                st.session_state.phase = "result"
+                            else:
+                                st.session_state.phase = "review"
+                            st.rerun()
+                        except requests.exceptions.ConnectionError:
+                            st.error(f"Cannot reach API at {API}. Start the backend with: `uvicorn backend.main:app --reload --port 8001`")
+                        except Exception as e:
+                            st.error(f"Error: {e}")
+
+        with tab_voice:
+            st.caption("Record a voice instruction (e.g. *'Tell Priya the meeting is delayed to 4 PM'*):")
+            audio_val = st.audio_input("Record voice command", label_visibility="collapsed")
+            if audio_val is not None:
+                if st.button("🎙️ Transcribe with Whisper & Send", type="primary", use_container_width=True, key="send_voice"):
+                    with st.spinner("🎙️ Transcribing with Whisper STT & verifying…"):
+                        try:
+                            res = api_voice(st.session_state.user_id, audio_val)
+                            transcription = res.get("transcription", "")
+                            st.session_state.chat_history.append({"role": "user", "content": f"🎙️ {transcription}"})
+                            st.session_state.thread_id   = res["thread_id"]
+                            st.session_state.agent_state = res["state"]
+                            st.session_state.user_input  = transcription
+
+                            if res.get("needs_clarify"):
+                                st.session_state.chat_history.append(
+                                    {"role": "assistant", "content": res["reply"]})
+                                st.session_state.phase = "input"
+                            elif res["state"].get("blocked"):
+                                st.session_state.phase = "result"
+                            else:
+                                st.session_state.phase = "review"
+                            st.rerun()
+                        except requests.exceptions.ConnectionError:
+                            st.error(f"Cannot reach API at {API}. Start the backend with: `uvicorn backend.main:app --reload --port 8001`")
+                        except Exception as e:
+                            st.error(f"Error: {e}")
+
+    elif st.session_state.phase in ("review", "undo_window", "result"):
         st.text_area("Your request", value=st.session_state.get("user_input", ""),
                      height=120, disabled=True, label_visibility="collapsed")
         if st.button("🔄 New Request", use_container_width=True):
@@ -298,14 +352,12 @@ with right:
             c1, c2, c3 = st.columns(3)
             with c1:
                 if st.button("✅ Confirm & Send", type="primary", use_container_width=True):
-                    with st.spinner("Final safety check → sending…"):
-                        try:
-                            res = api_confirm(st.session_state.thread_id, "confirm")
-                            st.session_state.agent_state = res["state"]
-                            st.session_state.phase = "result"
-                            st.rerun()
-                        except Exception as e:
-                            st.error(str(e))
+                    try:
+                        api_schedule_send(st.session_state.thread_id, delay_seconds=10)
+                        st.session_state.phase = "undo_window"
+                        st.rerun()
+                    except Exception as e:
+                        st.error(str(e))
             with c2:
                 if st.button("✏️ Edit", use_container_width=True):
                     st.session_state.edit_mode = True
@@ -320,6 +372,53 @@ with right:
                             st.rerun()
                         except Exception as e:
                             st.error(str(e))
+
+    elif st.session_state.phase == "undo_window":
+        s = st.session_state.agent_state
+        render_verification(s)
+        render_preview(s)
+
+        st.markdown("---")
+        st.warning("⏳ **Email is queued! 10-second Undo Window is active.**")
+
+        u1, u2 = st.columns([1.2, 1])
+        with u1:
+            if st.button("↩️ Undo Send (Cancel Delivery)", type="primary", use_container_width=True):
+                try:
+                    api_undo(st.session_state.thread_id)
+                    st.session_state.phase = "review"
+                    st.info("Delivery cancelled. Email draft restored for editing.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(str(e))
+        with u2:
+            if st.button("⚡ Send Now (Skip Delay)", use_container_width=True):
+                with st.spinner("Dispatching immediately…"):
+                    try:
+                        res = api_confirm(st.session_state.thread_id, "confirm")
+                        st.session_state.agent_state = res["state"]
+                        st.session_state.phase = "result"
+                        st.rerun()
+                    except Exception as e:
+                        st.error(str(e))
+
+        # Live countdown timer
+        status_box = st.empty()
+        progress_bar = st.progress(1.0)
+        for sec in range(10, 0, -1):
+            progress_bar.progress(sec / 10.0)
+            status_box.markdown(f"⏱️ **Dispatching to Gmail in {sec}s...** Click **Undo Send** above to stop.")
+            time.sleep(1)
+
+        time.sleep(0.5)
+        try:
+            status_res = api_status(st.session_state.thread_id)
+            if status_res.get("state"):
+                st.session_state.agent_state = status_res["state"]
+        except Exception:
+            pass
+        st.session_state.phase = "result"
+        st.rerun()
 
     elif st.session_state.phase == "result":
         s = st.session_state.agent_state
