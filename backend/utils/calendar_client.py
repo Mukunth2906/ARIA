@@ -40,14 +40,24 @@ def create_event(
     end_time: str,
     description: str = "",
     attendees: list = None,
+    reminder_minutes: int = 10,
 ) -> str:
-    """Create a calendar event, return the event ID."""
+    """
+    Create a calendar event with guaranteed reminder notifications.
+    Explicitly overrides reminders rather than relying on default calendar settings.
+    """
     svc = _service()
     body = {
         "summary":     summary,
         "description": description,
         "start":       {"dateTime": start_time, "timeZone": "Asia/Kolkata"},
         "end":         {"dateTime": end_time,   "timeZone": "Asia/Kolkata"},
+        "reminders": {
+            "useDefault": False,
+            "overrides": [
+                {"method": "popup", "minutes": reminder_minutes},
+            ],
+        },
     }
     if attendees:
         body["attendees"] = [{"email": a} for a in attendees]

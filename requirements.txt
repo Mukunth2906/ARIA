@@ -10,6 +10,10 @@ uvicorn[standard]>=0.29.0
 streamlit>=1.35.0
 requests>=2.31.0
 pydantic>=2.0.0
+python-multipart>=0.0.9
+
+# Audio / Speech-to-Text (Whisper STT)
+openai>=1.0.0
 
 # Google APIs
 google-auth>=2.0.0

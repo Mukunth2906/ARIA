@@ -59,6 +59,12 @@ If you say: *"Tell Priya the meeting is delayed to 4 PM"*, an ordinary AI bot mi
   - Dynamically learns user habits, top contacts, calendar constraints, and preferences across 6 distinct life categories.
   - Rewrites affected profile sections in under 3 present-tense sentences to prevent token bloat and memory drift.
   - Primary storage in MongoDB Atlas with seamless zero-config fallback to local JSON files.
+- **🎙️ Multimodal Voice Ingestion (Whisper STT)**:
+  - Hands-free voice commands transcribed using OpenAI Whisper (`whisper-1`) with Google Gemini audio fallback.
+  - Dedicated `/api/voice` and `/api/transcribe` REST endpoints with live in-browser microphone capture.
+- **↩️ 10-Second Undo Window & Delayed Dispatch Buffer**:
+  - Non-blocking asynchronous cancellation buffer (`asyncio.Task`) between human confirmation and Gmail dispatch.
+  - Dedicated `/api/schedule_send` and `/api/undo` endpoints allowing users to cancel delivery within a 10-second grace period.
 - **⚡ Optimized Inference**:
   - Consolidated architecture requiring only **4 LLM calls per email action** (down from 7).
   - Flexible multi-provider support: GitHub Models (`openai/gpt-4.1`), Google Gemini (`gemini-1.5-flash`), or OpenAI (`gpt-4o-mini`).
@@ -321,6 +327,7 @@ ARIA/
 │       ├── display.py              # Colorama terminal status visualizer for CLI
 │       ├── gmail_client.py         # Gmail API (list inbox, send email)
 │       ├── llm.py                  # Flexible LLM provider setup (GitHub Models / Gemini / OpenAI)
+│       ├── stt.py                  # Whisper STT & Gemini audio transcription engine
 │       └── token_manager.py        # Google OAuth 2.0 credentials & token refresh
 ├── frontend/
 │   └── app.py                      # Streamlit UI (dual-column chat + verification cards + audit)

@@ -2,18 +2,20 @@
 backend/main.py — ARIA FastAPI backend
 Run: uvicorn backend.main:app --reload --port 8001
 """
+import asyncio
 import json
 import os
 import uuid
-from typing import Optional
+from typing import Optional, Dict
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from langgraph.checkpoint.memory import MemorySaver
 from pydantic import BaseModel 
 
 from backend.graph import build_graph
 from backend.utils.db import load_profile
+from backend.utils.stt import transcribe_audio
 
 # ── App ────────────────────────────────────────────────────────────────────────
 app = FastAPI(title="ARIA API", version="2.0.0")
@@ -41,6 +43,19 @@ class ChatRequest(BaseModel):
 class ConfirmRequest(BaseModel):
     thread_id: str
     action: str                     # "confirm" | "cancel"
+
+
+class ScheduleSendRequest(BaseModel):
+    thread_id: str
+    delay_seconds: int = 10
+
+
+class UndoRequest(BaseModel):
+    thread_id: str
+
+
+# ── Active delayed dispatch tasks ──────────────────────────────────────────────
+_pending_dispatches: Dict[str, asyncio.Task] = {}
 
 
 class EditRequest(BaseModel):
@@ -139,6 +154,64 @@ def chat(req: ChatRequest):
     return _response(thread_id, snapshot)
 
 
+@app.post("/api/voice")
+async def voice_chat(
+    file: UploadFile = File(...),
+    user_id: str = Form("default"),
+):
+    """
+    Ingest voice recording, transcribe it using Whisper STT,
+    and trigger the LangGraph verification pipeline with the transcribed text.
+    """
+    audio_bytes = await file.read()
+    if not audio_bytes:
+        raise HTTPException(400, "Empty audio file received.")
+
+    filename = file.filename or "recording.wav"
+    try:
+        transcription = transcribe_audio(audio_bytes, filename=filename)
+    except Exception as e:
+        raise HTTPException(500, f"Speech-to-text error: {str(e)}")
+
+    if not transcription.strip():
+        raise HTTPException(400, "Could not detect any speech in the audio.")
+
+    thread_id = str(uuid.uuid4())
+    config    = {"configurable": {"thread_id": thread_id}}
+
+    initial = _default_state(user_id, transcription, thread_id)
+    try:
+        aria_graph.invoke(initial, config)
+    except Exception as e:
+        err_msg = str(e)
+        if "RESOURCE_EXHAUSTED" in err_msg or "429" in err_msg:
+            raise HTTPException(429, "Gemini API rate limit exceeded. Please wait 30-60 seconds and try again.")
+        raise HTTPException(500, f"Graph execution error: {err_msg[:200]}")
+
+    snapshot = aria_graph.get_state(config)
+    res = _response(thread_id, snapshot)
+    res["transcription"] = transcription
+    return res
+
+
+@app.post("/api/transcribe")
+async def transcribe_only(file: UploadFile = File(...)):
+    """
+    Transcribe audio only using Whisper STT without triggering the graph.
+    """
+    audio_bytes = await file.read()
+    if not audio_bytes:
+        raise HTTPException(400, "Empty audio file received.")
+
+    filename = file.filename or "recording.wav"
+    try:
+        transcription = transcribe_audio(audio_bytes, filename=filename)
+    except Exception as e:
+        raise HTTPException(500, f"Speech-to-text error: {str(e)}")
+
+    return {"transcription": transcription}
+
+
 @app.post("/api/confirm")
 def confirm(req: ConfirmRequest):
     """Resume paused graph with confirm / cancel decision."""
@@ -166,6 +239,86 @@ def confirm(req: ConfirmRequest):
 
     snapshot = aria_graph.get_state(config)
     return _response(req.thread_id, snapshot)
+
+
+@app.post("/api/schedule_send")
+async def schedule_send(req: ScheduleSendRequest):
+    """
+    Queue email for sending with an undo grace period (default 10s).
+    If /api/undo is called before the timer expires, the send is cancelled.
+    """
+    thread_id = req.thread_id
+    config = {"configurable": {"thread_id": thread_id}}
+    snapshot = aria_graph.get_state(config)
+    if not snapshot or not snapshot.values:
+        raise HTTPException(404, "Session not found.")
+
+    # Cancel any existing queued task for this thread
+    if thread_id in _pending_dispatches and not _pending_dispatches[thread_id].done():
+        _pending_dispatches[thread_id].cancel()
+
+    async def _execute_after_delay():
+        try:
+            await asyncio.sleep(req.delay_seconds)
+            # Grace period elapsed without undo -> execute send!
+            aria_graph.update_state(config, {"confirmed": True, "cancelled": False})
+            aria_graph.invoke(None, config)
+        except asyncio.CancelledError:
+            # User triggered Undo! Do not invoke send.
+            pass
+        finally:
+            _pending_dispatches.pop(thread_id, None)
+
+    task = asyncio.create_task(_execute_after_delay())
+    _pending_dispatches[thread_id] = task
+
+    return {
+        "status": "queued",
+        "thread_id": thread_id,
+        "undo_window_seconds": req.delay_seconds,
+        "message": f"Sending queued with a {req.delay_seconds}s undo window.",
+    }
+
+
+@app.post("/api/undo")
+def undo_send(req: UndoRequest):
+    """
+    Cancel an email queued in the delayed dispatch buffer.
+    """
+    thread_id = req.thread_id
+    task = _pending_dispatches.get(thread_id)
+    if task and not task.done():
+        task.cancel()
+        _pending_dispatches.pop(thread_id, None)
+        return {
+            "status": "undone",
+            "thread_id": thread_id,
+            "message": "Dispatch cancelled successfully. No email was sent.",
+        }
+
+    config = {"configurable": {"thread_id": thread_id}}
+    snapshot = aria_graph.get_state(config)
+    state = _safe(snapshot) if snapshot else {}
+    if state.get("send_success"):
+        raise HTTPException(400, "Cannot undo: email has already been dispatched via Gmail API.")
+
+    return {"status": "not_queued", "message": "No active queued dispatch found for this session."}
+
+
+@app.get("/api/status/{thread_id}")
+def thread_status(thread_id: str):
+    """
+    Check current execution status of a thread (e.g. queued, sent, paused).
+    """
+    is_queued = thread_id in _pending_dispatches and not _pending_dispatches[thread_id].done()
+    config = {"configurable": {"thread_id": thread_id}}
+    snapshot = aria_graph.get_state(config)
+    state = _safe(snapshot) if snapshot else {}
+    return {
+        "thread_id": thread_id,
+        "is_queued": is_queued,
+        "state": state,
+    }
 
 
 @app.post("/api/edit")

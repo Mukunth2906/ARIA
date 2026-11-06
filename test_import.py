@@ -34,6 +34,10 @@ try:
     from backend.main import app
     p("  OK")
     
+    p("Step 7: Importing backend.utils.stt (Whisper STT)...")
+    from backend.utils.stt import transcribe_audio
+    p("  OK")
+    
     p("\n=== ALL IMPORTS SUCCESSFUL ===")
 except Exception as e:
     p(f"\n=== IMPORT FAILED ===")
