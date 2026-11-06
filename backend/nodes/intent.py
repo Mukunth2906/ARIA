@@ -7,6 +7,7 @@ This saves 1 LLM call by combining intent + entity extraction.
 """
 import json
 import uuid
+from datetime import datetime, timedelta
 
 from backend.state import AgentState
 from backend.utils.llm import get_llm
@@ -23,9 +24,19 @@ User profile context:
 
 User message: "{user_input}"
 
-Do TWO things in one response:
-1. Classify the intent
-2. Extract ALL email entities and write a complete email body
+Do the following in ONE JSON response:
+1. Classify the intent:
+   - "send_email": Send an email (including meeting invitations/requests).
+   - "draft_email": Create a draft only.
+   - "schedule_event": Scheduling a calendar event or reminder.
+2. Extract email entities (recipient_name, recipient_email, subject, polished body_draft).
+3. If the request mentions scheduling or proposing a meeting, call, or appointment (e.g. "meet at 4pm", "call tomorrow at 10 AM"):
+   - Set "calendar_event_needed": true
+   - Set "calendar_title": "<e.g. Meeting with Priya>"
+   - Set "meeting_date": "<YYYY-MM-DD or 'today' or 'tomorrow'>"
+   - Set "meeting_time": "<HH:MM in 24-hr format, e.g. 16:00>"
+   - Set "duration_minutes": 30
+   Otherwise set "calendar_event_needed": false.
 
 Return JSON only — no prose, no markdown fences:
 {{
@@ -37,9 +48,53 @@ Return JSON only — no prose, no markdown fences:
   "subject":         "<email subject line>",
   "body_draft":      "<complete ready-to-send email body>",
   "tone":            "formal | casual | urgent",
+  "calendar_event_needed": <true or false>,
+  "calendar_title": "<meeting title or empty>",
+  "meeting_date": "<YYYY-MM-DD or today or tomorrow>",
+  "meeting_time": "<HH:MM in 24hr or empty>",
+  "duration_minutes": 30,
   "ambiguity_reason": "<if confidence < 0.6, explain what's unclear>"
 }}
 """
+
+
+def _build_event_timestamps(parsed: dict) -> tuple:
+    now = datetime.now()
+    date_str = str(parsed.get("meeting_date", "")).strip().lower()
+    time_str = str(parsed.get("meeting_time", "16:00")).strip()
+
+    target_date = now.date()
+    if "tomorrow" in date_str:
+        target_date = target_date + timedelta(days=1)
+    elif date_str and date_str != "today":
+        try:
+            target_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+        except Exception:
+            target_date = now.date()
+
+    hour, minute = 16, 0
+    if time_str:
+        try:
+            t = time_str.lower().replace("am", "").replace("pm", "").strip()
+            parts = t.split(":")
+            h = int(parts[0])
+            m = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
+            if "pm" in time_str.lower() and h < 12:
+                h += 12
+            elif "am" in time_str.lower() and h == 12:
+                h = 0
+            hour, minute = h, m
+        except Exception:
+            hour, minute = 16, 0
+
+    duration = int(parsed.get("duration_minutes") or 30)
+    start_dt = datetime.combine(target_date, datetime.min.time()).replace(hour=hour, minute=minute)
+    end_dt = start_dt + timedelta(minutes=duration)
+
+    tz_offset = "+05:30"
+    start_iso = start_dt.strftime("%Y-%m-%dT%H:%M:%S") + tz_offset
+    end_iso = end_dt.strftime("%Y-%m-%dT%H:%M:%S") + tz_offset
+    return start_iso, end_iso
 
 
 def parse_intent_node(state: AgentState) -> dict:
@@ -57,6 +112,16 @@ def parse_intent_node(state: AgentState) -> dict:
     text = _strip_fences(response.content)
     parsed = json.loads(text)
 
+    cal_needed = bool(parsed.get("calendar_event_needed", False))
+    if parsed.get("intent") == "schedule_event":
+        cal_needed = True
+
+    start_iso, end_iso = "", ""
+    cal_title = ""
+    if cal_needed:
+        start_iso, end_iso = _build_event_timestamps(parsed)
+        cal_title = parsed.get("calendar_title") or f"Meeting with {parsed.get('recipient_name') or 'Team'}"
+
     return {
         "intent":             parsed.get("intent", "unknown"),
         "intent_description": parsed.get("intent_description", ""),
@@ -69,6 +134,11 @@ def parse_intent_node(state: AgentState) -> dict:
         "subject":            parsed.get("subject", ""),
         "body_draft":         parsed.get("body_draft", ""),
         "tone":               parsed.get("tone", "formal"),
+        # Calendar Dual-Action details
+        "calendar_event_needed": cal_needed,
+        "calendar_event_title":  cal_title,
+        "calendar_start_time":   start_iso,
+        "calendar_end_time":     end_iso,
     }
 
 

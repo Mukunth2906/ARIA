@@ -32,6 +32,14 @@ class AgentState(TypedDict, total=False):
     tone:               str         # formal / casual / urgent
     time_hint:          str         # for calendar events
 
+    # ── Calendar Event Details ───────────────────────────────────────────────
+    calendar_event_needed:      bool        # True if request involves scheduling a meeting
+    calendar_event_title:       str         # Event title / summary
+    calendar_start_time:        str         # ISO-8601 string
+    calendar_end_time:          str         # ISO-8601 string
+    calendar_event_id:          str         # Returned Google Calendar Event ID
+    calendar_success:           bool        # True if calendar event created successfully
+
     # ── Security: PII scanner ────────────────────────────────────────────────
     pii_clean:                  bool
     pii_warning:                list
