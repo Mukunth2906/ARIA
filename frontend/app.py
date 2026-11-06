@@ -188,6 +188,18 @@ def render_preview(s):
     </div>
     """, unsafe_allow_html=True)
 
+    if s.get("calendar_event_needed"):
+        st.markdown(f"""
+        <div class="email-card" style="border-left: 4px solid #a855f7;">
+          <h3 style="color:#c084fc;">📅 Calendar Invitation (Auto-Scheduled)</h3>
+          <div class="em">Event: <span>{s.get('calendar_event_title','Meeting')}</span></div>
+          <div class="em">Start: <span>{s.get('calendar_start_time','N/A')}</span></div>
+          <div class="em">End: <span>{s.get('calendar_end_time','N/A')}</span></div>
+          <div class="em">Attendee: <span>{s.get('recipient_email','N/A')}</span></div>
+          <div class="em">Reminder: <span>🔔 10 minutes prior (Popup)</span></div>
+        </div>
+        """, unsafe_allow_html=True)
+
 
 # ── Sidebar: user ID + profile ────────────────────────────────────────────────
 with st.sidebar:
@@ -425,9 +437,11 @@ with right:
         render_verification(s)
 
         if s.get("send_success"):
+            cal_info = f"<br><small>📅 Calendar Event ID: {s.get('calendar_event_id')}</small>" if s.get("calendar_success") else ""
             st.markdown(f"""<div class="out-sent">
-              ✅ <b>EMAIL SENT SUCCESSFULLY</b><br>
-              <small>Message ID: {s.get('gmail_message_id','—')}</small><br>
+              ✅ <b>ACTION COMPLETED SUCCESSFULLY</b><br>
+              <small>Gmail Message ID: {s.get('gmail_message_id','—')}</small>
+              {cal_info}<br>
               <small>Audit entry #{s.get('audit_entry_id','—')}</small>
             </div>""", unsafe_allow_html=True)
         elif s.get("cancelled"):
