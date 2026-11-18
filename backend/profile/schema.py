@@ -37,6 +37,10 @@ class UserProfile:
     contacts_section: str = ""
     # e.g. "Top contacts: Priya (manager), Raj (teammate), Amma (personal)."
 
+    # ── RAG Privacy & Retention Controls ──────────────────────────────────────
+    rag_consent: bool = True
+    rag_retention_days: int = 90
+
     # ── Runtime counters (not persisted across sessions) ─────────────────────
     vague_attempt_count: int = 0
     session_context: list = field(default_factory=list)
@@ -53,6 +57,8 @@ class UserProfile:
             "travel_section":     self.travel_section,
             "user_info_section":  self.user_info_section,
             "contacts_section":   self.contacts_section,
+            "rag_consent":        self.rag_consent,
+            "rag_retention_days": self.rag_retention_days,
         }
 
     @classmethod
@@ -69,4 +75,6 @@ class UserProfile:
             travel_section=data.get("travel_section", ""),
             user_info_section=data.get("user_info_section", ""),
             contacts_section=data.get("contacts_section", ""),
+            rag_consent=bool(data.get("rag_consent", True)),
+            rag_retention_days=int(data.get("rag_retention_days", 90)),
         )

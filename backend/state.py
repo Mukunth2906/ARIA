@@ -78,6 +78,12 @@ class AgentState(TypedDict, total=False):
     # ── Assistant reply (for clarifications / general responses) ─────────────
     assistant_reply:    str
 
+    # ── Persistent RAG & Source Attribution ──────────────────────────────────
+    rag_consent:        bool        # User consent for indexing session context
+    rag_sources:        list        # List of retrieved/cited source dicts
+    rag_attribution:    str         # Human-readable explanation of which sources grounded the reply
+    rag_indexed_ids:    list        # Doc IDs indexed into ChromaDB after session
+
     # ── Audit ────────────────────────────────────────────────────────────────
     audit_logged:       bool
     audit_entry_id:     int

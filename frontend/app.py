@@ -134,6 +134,32 @@ def api_audit() -> list:
         r.raise_for_status(); return r.json().get("entries", [])
     except Exception: return []
 
+def api_rag_list(user_id: str) -> list:
+    try:
+        r = requests.get(f"{API}/api/rag/context/{user_id}", timeout=10)
+        r.raise_for_status(); return r.json().get("items", [])
+    except Exception: return []
+
+def api_rag_delete_item(user_id: str, doc_id: str) -> bool:
+    try:
+        r = requests.delete(f"{API}/api/rag/context/{user_id}/{doc_id}", timeout=10)
+        r.raise_for_status(); return True
+    except Exception: return False
+
+def api_rag_wipe(user_id: str) -> int:
+    try:
+        r = requests.delete(f"{API}/api/rag/context/{user_id}", timeout=10)
+        r.raise_for_status(); return r.json().get("deleted_count", 0)
+    except Exception: return 0
+
+def api_update_rag_settings(user_id: str, rag_consent: bool, rag_retention_days: int) -> dict:
+    r = requests.patch(
+        f"{API}/api/profile/{user_id}/rag-settings",
+        json={"rag_consent": rag_consent, "rag_retention_days": rag_retention_days},
+        timeout=10,
+    )
+    r.raise_for_status(); return r.json()
+
 
 # ── Render helpers ─────────────────────────────────────────────────────────────
 def _badge(risk):
@@ -200,8 +226,31 @@ def render_preview(s):
         </div>
         """, unsafe_allow_html=True)
 
+    rag_sources = s.get("rag_sources") or []
+    if rag_sources:
+        attribution = s.get("rag_attribution", "")
+        rows_html = ""
+        for src in rag_sources:
+            cited_badge = "📌 Cited" if src.get("cited") else "🔍 Retrieved"
+            sim_pct = f"{float(src.get('similarity', 0.0)):.0%}"
+            rows_html += (
+                f"<div class='chk'>"
+                f"<span>{cited_badge} <b>[{src.get('doc_type', 'context')}]</b> "
+                f"{src.get('source_label', src.get('doc_id', ''))} "
+                f"<small style='color:#94a3b8'>({src.get('timestamp_iso', '')[:10]} · relevance {sim_pct})</small></span>"
+                f"</div>"
+            )
+        summary_html = f"<div class='em' style='margin-bottom:8px;'><span>{attribution}</span></div>" if attribution else ""
+        st.markdown(f"""
+        <div class="email-card" style="border-left: 4px solid #38bdf8;">
+          <h3 style="color:#38bdf8;">📚 Grounded Sources (RAG Attribution)</h3>
+          {summary_html}
+          {rows_html}
+        </div>
+        """, unsafe_allow_html=True)
 
-# ── Sidebar: user ID + profile ────────────────────────────────────────────────
+
+# ── Sidebar: user ID + profile + RAG privacy controls ─────────────────────────
 with st.sidebar:
     st.markdown("### 👤 User")
     st.session_state.user_id = st.text_input("User ID", value=st.session_state.user_id)
@@ -229,6 +278,46 @@ with st.sidebar:
 
     if st.button("🔄 Refresh profile"):
         st.rerun()
+
+    st.markdown("---")
+    st.markdown("### 🧠 RAG Memory & Privacy")
+    cur_consent = bool(profile.get("rag_consent", True))
+    cur_retention = int(profile.get("rag_retention_days", 90))
+    retention_options = [30, 90, 180, 365]
+    if cur_retention not in retention_options:
+        retention_options.append(cur_retention)
+        retention_options.sort()
+
+    new_consent = st.toggle("Allow RAG Indexing (Consent)", value=cur_consent, key="rag_consent_toggle")
+    new_retention = st.selectbox(
+        "Retention TTL (days)",
+        options=retention_options,
+        index=retention_options.index(cur_retention),
+        key="rag_retention_select",
+    )
+    if new_consent != cur_consent or new_retention != cur_retention:
+        if st.button("💾 Save Privacy Settings", use_container_width=True):
+            try:
+                api_update_rag_settings(st.session_state.user_id, new_consent, new_retention)
+                st.success("RAG privacy settings updated.")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Could not save settings: {e}")
+
+    rag_items = api_rag_list(st.session_state.user_id)
+    st.caption(f"Indexed persistent chunks: **{len(rag_items)}**")
+    if rag_items:
+        with st.expander("Inspect / Delete RAG Items", expanded=False):
+            for item in rag_items[:10]:
+                st.markdown(f"**[{item.get('doc_type')}]** {item.get('source_label')}")
+                st.caption(f"{item.get('timestamp_iso', '')[:10]} · `{item.get('doc_id')}`")
+                if st.button("Delete", key=f"del_{item.get('doc_id')}"):
+                    if api_rag_delete_item(st.session_state.user_id, item["doc_id"]):
+                        st.rerun()
+        if st.button("🗑️ Wipe All RAG Memory", use_container_width=True):
+            removed = api_rag_wipe(st.session_state.user_id)
+            st.success(f"Wiped {removed} indexed records.")
+            st.rerun()
 
 
 # ── Main layout ────────────────────────────────────────────────────────────────

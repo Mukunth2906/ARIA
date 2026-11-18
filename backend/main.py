@@ -6,16 +6,24 @@ import asyncio
 import json
 import os
 import uuid
-from typing import Optional, Dict
+from typing import Optional, Dict, List
 
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from langgraph.checkpoint.memory import MemorySaver
-from pydantic import BaseModel 
+from pydantic import BaseModel
 
 from backend.graph import build_graph
-from backend.utils.db import load_profile
+from backend.utils.db import load_profile, save_profile
 from backend.utils.stt import transcribe_audio
+from backend.utils.vector_store import (
+    upsert_context,
+    query_context,
+    list_user_context,
+    delete_context_item,
+    delete_all_user_context,
+    purge_expired_context,
+)
 
 # ── App ────────────────────────────────────────────────────────────────────────
 app = FastAPI(title="ARIA API", version="2.0.0")
@@ -38,6 +46,7 @@ AUDIT_LOG_FILE = "aria_audit.jsonl"
 class ChatRequest(BaseModel):
     user_id: str = "default"
     message: str
+    rag_consent: Optional[bool] = None
 
 
 class ConfirmRequest(BaseModel):
@@ -54,6 +63,30 @@ class UndoRequest(BaseModel):
     thread_id: str
 
 
+class RagIngestRequest(BaseModel):
+    user_id: str = "default"
+    text: str
+    doc_type: str = "contact_note"  # sent_email | calendar_event | contact_note | session_summary
+    source_label: str = "User note"
+    recipient_email: str = ""
+    subject: str = ""
+    retention_days: Optional[int] = None
+
+
+class RagQueryRequest(BaseModel):
+    user_id: str = "default"
+    query: str
+    n_results: int = 3
+    doc_types: Optional[List[str]] = None
+    recipient_email: Optional[str] = None
+    max_age_days: Optional[int] = None
+
+
+class RagSettingsRequest(BaseModel):
+    rag_consent: Optional[bool] = None
+    rag_retention_days: Optional[int] = None
+
+
 # ── Active delayed dispatch tasks ──────────────────────────────────────────────
 _pending_dispatches: Dict[str, asyncio.Task] = {}
 
@@ -67,8 +100,14 @@ class EditRequest(BaseModel):
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
-def _default_state(user_id: str, user_input: str, thread_id: str) -> dict:
+def _default_state(
+    user_id: str,
+    user_input: str,
+    thread_id: str,
+    rag_consent: Optional[bool] = None,
+) -> dict:
     profile = load_profile(user_id)
+    effective_consent = profile.rag_consent if rag_consent is None else bool(rag_consent)
     return {
         "original_input":            user_input,
         "thread_id":                 thread_id,
@@ -91,12 +130,17 @@ def _default_state(user_id: str, user_input: str, thread_id: str) -> dict:
         "failed_checks":             [],
         "audit_logged":              False,
         "vague_attempt_count":       0,
+        # persistent RAG defaults
+        "rag_consent":               effective_consent,
+        "rag_sources":               [],
+        "rag_attribution":           "",
+        "rag_indexed_ids":           [],
     }
 
 
 def _safe(snapshot) -> dict:
     raw = dict(snapshot.values) if hasattr(snapshot, "values") else dict(snapshot)
-    for f in ("pii_warning", "policy_violations", "failed_checks", "messages"):
+    for f in ("pii_warning", "policy_violations", "failed_checks", "messages", "rag_sources", "rag_indexed_ids"):
         if raw.get(f) is None:
             raw[f] = []
     return raw
@@ -105,16 +149,18 @@ def _safe(snapshot) -> dict:
 def _response(thread_id: str, snapshot) -> dict:
     state = _safe(snapshot)
     return {
-        "thread_id":    thread_id,
-        "state":        state,
-        "interrupted":  bool(snapshot.next),
-        "next_node":    list(snapshot.next) if snapshot.next else [],
+        "thread_id":       thread_id,
+        "state":           state,
+        "interrupted":     bool(snapshot.next),
+        "next_node":       list(snapshot.next) if snapshot.next else [],
         # convenience fields for frontend
-        "needs_confirm": bool(snapshot.next) and not state.get("blocked"),
-        "needs_clarify": bool(state.get("assistant_reply")) and not state.get("blocked"),
-        "reply":         state.get("assistant_reply", ""),
-        "blocked":       state.get("blocked", False),
-        "risk_level":    state.get("overall_risk"),
+        "needs_confirm":   bool(snapshot.next) and not state.get("blocked"),
+        "needs_clarify":   bool(state.get("assistant_reply")) and not state.get("blocked"),
+        "reply":           state.get("assistant_reply", ""),
+        "blocked":         state.get("blocked", False),
+        "risk_level":      state.get("overall_risk"),
+        "rag_sources":     state.get("rag_sources", []),
+        "rag_attribution": state.get("rag_attribution", ""),
     }
 
 
@@ -141,7 +187,7 @@ def chat(req: ChatRequest):
     thread_id = str(uuid.uuid4())
     config    = {"configurable": {"thread_id": thread_id}}
 
-    initial = _default_state(req.user_id, req.message, thread_id)
+    initial = _default_state(req.user_id, req.message, thread_id, rag_consent=req.rag_consent)
     try:
         aria_graph.invoke(initial, config)
     except Exception as e:
@@ -363,6 +409,93 @@ def edit(req: EditRequest):
 def get_profile(user_id: str):
     profile = load_profile(user_id)
     return profile.to_dict()
+
+
+@app.patch("/api/profile/{user_id}/rag-settings")
+def update_rag_settings(user_id: str, req: RagSettingsRequest):
+    """Update user's RAG indexing consent and retention TTL policy."""
+    profile = load_profile(user_id)
+    if req.rag_consent is not None:
+        profile.rag_consent = bool(req.rag_consent)
+    if req.rag_retention_days is not None:
+        if req.rag_retention_days < 1 or req.rag_retention_days > 365:
+            raise HTTPException(400, "rag_retention_days must be between 1 and 365.")
+        profile.rag_retention_days = int(req.rag_retention_days)
+    save_profile(profile)
+    return profile.to_dict()
+
+
+# ── Persistent RAG Management & Privacy Routes ─────────────────────────────────
+
+@app.get("/api/rag/context/{user_id}")
+def get_rag_context(user_id: str, doc_type: Optional[str] = None, limit: int = 50):
+    """Inspect all vector documents indexed for this user."""
+    items = list_user_context(user_id, doc_type=doc_type, limit=limit)
+    return {"user_id": user_id, "count": len(items), "items": items}
+
+
+@app.post("/api/rag/context")
+def ingest_rag_context(req: RagIngestRequest):
+    """
+    Privacy-gated ingestion of selected user context into persistent ChromaDB.
+    Enforces user consent and deterministic PII/secret blocking.
+    """
+    profile = load_profile(req.user_id)
+    retention = req.retention_days if req.retention_days is not None else profile.rag_retention_days
+    result = upsert_context(
+        user_id=req.user_id,
+        text=req.text,
+        doc_type=req.doc_type,
+        source_label=req.source_label,
+        recipient_email=req.recipient_email,
+        subject=req.subject,
+        retention_days=retention,
+        consent=profile.rag_consent,
+        pii_clean=True,
+    )
+    if not result.get("indexed"):
+        raise HTTPException(400, result.get("reason", "Context could not be indexed."))
+    return result
+
+
+@app.post("/api/rag/query")
+def query_rag_context(req: RagQueryRequest):
+    """Metadata-filtered semantic search returning attributed source records."""
+    profile = load_profile(req.user_id)
+    max_age = req.max_age_days if req.max_age_days is not None else profile.rag_retention_days
+    hits = query_context(
+        user_id=req.user_id,
+        query_text=req.query,
+        n_results=req.n_results,
+        doc_types=req.doc_types,
+        recipient_email=req.recipient_email,
+        max_age_days=max_age,
+        exclude_expired=True,
+    )
+    return {"user_id": req.user_id, "count": len(hits), "sources": hits}
+
+
+@app.delete("/api/rag/context/{user_id}/{doc_id}")
+def delete_single_rag_item(user_id: str, doc_id: str):
+    """Delete a single indexed RAG document."""
+    deleted = delete_context_item(user_id, doc_id)
+    if not deleted:
+        raise HTTPException(404, f"Document '{doc_id}' not found for user '{user_id}'.")
+    return {"deleted": True, "user_id": user_id, "doc_id": doc_id}
+
+
+@app.delete("/api/rag/context/{user_id}")
+def wipe_user_rag_context(user_id: str):
+    """Right-to-be-Forgotten: permanently wipe all RAG vectors for a user."""
+    removed = delete_all_user_context(user_id)
+    return {"wiped": True, "user_id": user_id, "deleted_count": removed}
+
+
+@app.post("/api/rag/purge/{user_id}")
+def purge_user_expired_rag(user_id: str):
+    """Purge all indexed RAG items past their retention TTL."""
+    purged = purge_expired_context(user_id)
+    return {"user_id": user_id, "purged_count": purged}
 
 
 @app.get("/api/audit")

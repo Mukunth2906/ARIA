@@ -55,6 +55,12 @@ If you say: *"Tell Priya the meeting is delayed to 4 PM"*, an ordinary AI bot mi
   - **Gate 4 (Content Policy)**: Blocks harassment, abusive language, spam patterns, and tone mismatches.
   - **Gate 5 (Risk Scorer)**: Evaluates action reversibility, content sensitivity, and recipient risk (LOW / MEDIUM / HIGH).
   - **Gate 6 (Human Confirmation)**: Pauses execution using LangGraph state interrupts (`interrupt_before=["human_confirm"]`), providing a live draft preview with full options to **Confirm & Send**, **Edit & Re-verify**, or **Cancel**.
+- **📚 Persistent, Privacy-Aware RAG (`ChromaDB PersistentClient`)**:
+  - **Selective Ingestion (`collection.upsert`)**: Indexes consented, PII-clean sent email summaries, calendar events, and session context to disk (`./chroma_store`) with strict per-user isolation.
+  - **Metadata Filtering**: Filters vector search by `user_id`, `doc_type`, `recipient_email`, and `timestamp` / retention TTL.
+  - **Source Attribution**: Explicitly cites which stored context chunks grounded ARIA's disambiguation in the UI and audit log.
+  - **Privacy & Governance**: User consent toggle, deterministic PII/secret ingestion blocking, TTL expiration purging, and Right-to-be-Forgotten deletion APIs (`/api/rag/context/{user_id}`).
+  - **Retrieval Evaluation Suite (`tests/eval_rag.py`)**: Benchmarks Hit@1, Hit@3, MRR, metadata filtering, multi-user isolation, and privacy enforcement.
 - **🧠 Continuous Memory & Profile Adaptation**:
   - Dynamically learns user habits, top contacts, calendar constraints, and preferences across 6 distinct life categories.
   - Rewrites affected profile sections in under 3 present-tense sentences to prevent token bloat and memory drift.
@@ -328,9 +334,12 @@ ARIA/
 │       ├── gmail_client.py         # Gmail API (list inbox, send email)
 │       ├── llm.py                  # Flexible LLM provider setup (GitHub Models / Gemini / OpenAI)
 │       ├── stt.py                  # Whisper STT & Gemini audio transcription engine
-│       └── token_manager.py        # Google OAuth 2.0 credentials & token refresh
+│       ├── token_manager.py        # Google OAuth 2.0 credentials & token refresh
+│       └── vector_store.py         # Persistent ChromaDB client (upsert, metadata filter, TTL, deletion)
 ├── frontend/
-│   └── app.py                      # Streamlit UI (dual-column chat + verification cards + audit)
+│   └── app.py                      # Streamlit UI (dual-column chat + verification + RAG attribution + privacy)
+├── tests/
+│   └── eval_rag.py                 # RAG retrieval quality (Hit@1/Hit@3/MRR), isolation & privacy evaluation
 ├── requirements.txt                # Python dependencies
 ├── .env.example                    # Environment variable template
 └── README.md                       # Project documentation

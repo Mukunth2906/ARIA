@@ -105,6 +105,21 @@ def parse_intent_node(state: AgentState) -> dict:
     profile = UserProfile.from_dict(profile_dict) if profile_dict else UserProfile(user_id="?")
     profile_ctx = build_context_bundle(profile)
 
+    # If selective_rag ran on a prior pass, append grounded RAG sources + hints
+    rag_sources = state.get("rag_sources") or []
+    if rag_sources:
+        rag_lines = ["\n[RETRIEVED HISTORICAL CONTEXT (RAG)]"]
+        for s in rag_sources:
+            rag_lines.append(
+                f"- ({s.get('doc_type', 'context')} | {s.get('timestamp_iso', '')}) "
+                f"{s.get('source_label', '')}: {s.get('document', '')}"
+            )
+        if state.get("subject_hint"):
+            rag_lines.append(f"- Suggested subject: {state['subject_hint']}")
+        if state.get("body_hint"):
+            rag_lines.append(f"- Suggested body hint: {state['body_hint']}")
+        profile_ctx = profile_ctx + "\n" + "\n".join(rag_lines)
+
     response = llm.invoke(INTENT_AND_ENTITY_PROMPT.format(
         profile_context=profile_ctx,
         user_input=user_input,

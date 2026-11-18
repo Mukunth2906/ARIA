@@ -37,7 +37,11 @@ try:
     p("Step 7: Importing backend.utils.stt (Whisper STT)...")
     from backend.utils.stt import transcribe_audio
     p("  OK")
-    
+
+    p("Step 8: Importing backend.utils.vector_store (Persistent RAG)...")
+    from backend.utils.vector_store import upsert_context, query_context
+    p("  OK")
+
     p("\n=== ALL IMPORTS SUCCESSFUL ===")
 except Exception as e:
     p(f"\n=== IMPORT FAILED ===")

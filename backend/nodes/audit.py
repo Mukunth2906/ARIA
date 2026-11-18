@@ -51,6 +51,18 @@ def audit_log_node(state: AgentState) -> dict:
         "block_reason":     state.get("block_reason") or state.get("validation_error"),
         "failed_checks":    state.get("failed_checks", []),
         "gmail_message_id": state.get("gmail_message_id"),
+        "calendar_event_id": state.get("calendar_event_id"),
+        "rag_sources": [
+            {
+                "doc_id":       s.get("doc_id"),
+                "source_label": s.get("source_label"),
+                "doc_type":     s.get("doc_type"),
+                "similarity":   s.get("similarity"),
+                "cited":        s.get("cited", False),
+            }
+            for s in (state.get("rag_sources") or [])
+        ],
+        "rag_attribution":  state.get("rag_attribution", ""),
     }
 
     with open(AUDIT_LOG_FILE, "a", encoding="utf-8") as f:
